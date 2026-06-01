@@ -299,10 +299,12 @@ def main() -> int:
                 sev_counts[sev] += 1
                 total += 1
 
-    # Finalise
+    # Finalise: compute display fields from the full set, then truncate.
     categories: list[dict] = []
     for c in bucket.values():
-        c["files"] = sorted(c["files"])[:10]
+        all_locations = sorted(c["files"])
+        c["unique_locations"] = len(all_locations)
+        c["files"] = all_locations[:10]
         categories.append(c)
     categories.sort(key=lambda c: (
         SEVERITY_ORDER.index(c["severity"]),
@@ -409,6 +411,7 @@ def render(categories: list[dict], total: int, tools: set[str], sev_counts: dict
   .files {{ font-size: 12px; color: #64748b; margin-top: 6px; }}
   .files code {{ background: #f1f5f9; padding: 1px 6px; border-radius: 4px; font-size: 12px; }}
   footer {{ margin-top: 32px; color: #94a3b8; font-size: 12px; text-align: center; }}
+  @page {{ margin: 1cm; }}
   @media print {{
     body {{ background: white; padding: 16px; }}
     .card, .verdict {{ box-shadow: none; border: 1px solid #e2e8f0; }}
@@ -446,7 +449,8 @@ def render_card(c: dict) -> str:
     files_html = ""
     if c["files"]:
         items = " ".join(f"<code>{escape(f)}</code>" for f in c["files"])
-        more = f" + {c['count'] - len(c['files'])} more occurrence(s)" if c["count"] > len(c["files"]) else ""
+        hidden = c["unique_locations"] - len(c["files"])
+        more = f" + {hidden} more location(s)" if hidden > 0 else ""
         files_html = f'<div class="files">Where: {items}{escape(more)}</div>'
 
     score_label = f" · {c['score']:.1f}" if c["score"] > 0 else ""

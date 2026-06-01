@@ -255,8 +255,8 @@ jobs:
       - name: Convert HTML to PDF (headless Chrome)
         run: |
           google-chrome --headless --disable-gpu --no-sandbox \
+            --no-pdf-header-footer \
             --print-to-pdf=reports/security-report.pdf \
-            --print-to-pdf-no-header \
             "file://$(pwd)/reports/security-report.html"
 
       - name: Upload final PDF
