@@ -60,59 +60,66 @@ jobs:
           path: codeql-results
           retention-days: 30
 
-      # -----------------------------------------------------------------------
-      # Polished PDF report — uses HTML templates + headless Chrome
-      # https://github.com/rsdmike/github-security-report-action
-      # -----------------------------------------------------------------------
-      - name: Generate PDF security report
+      - name: Setup Python
         if: always()
-        uses: rsdmike/github-security-report-action@v3.0.4
+        uses: actions/setup-python@v5
         with:
-          token: ${{ secrets.GIT_TOKEN }}
-          sarifReportDir: codeql-results
-          outputDir: reports
-          template: report
+          python-version: "3.12"
 
-      - name: Upload PDF report
+      - name: Generate one-page HTML report
+        if: always()
+        run: |
+          mkdir -p reports
+          python3 .github/scripts/sarif_to_report.py codeql-results reports/security-report.html
+
+      # Convert the HTML to a single-page PDF using headless Chrome.
+      - name: Convert HTML to PDF
+        if: always()
+        run: |
+          # Chromium ships with the ubuntu-latest runner image
+          google-chrome --headless --disable-gpu --no-sandbox \
+            --print-to-pdf=reports/security-report.pdf \
+            --print-to-pdf-no-header \
+            "file://$(pwd)/reports/security-report.html" || \
+          chromium-browser --headless --disable-gpu --no-sandbox \
+            --print-to-pdf=reports/security-report.pdf \
+            --print-to-pdf-no-header \
+            "file://$(pwd)/reports/security-report.html" || true
+          ls -lh reports
+
+      - name: Upload human-readable report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: codeql-pdf-report
-          path: reports/*.pdf
-          if-no-files-found: warn
+          name: security-report
+          path: reports
           retention-days: 30
 
-      - name: Write summary to workflow run page
-        if: always()
-        run: |
-          {
-            echo "# 🛡️ CodeQL Security Scan"
-            echo ""
-            echo "**Repository:** \`${{ github.repository }}\`  "
-            echo "**Branch / commit:** \`${{ github.ref_name }}\` @ \`${{ github.sha }}\`  "
-            echo "**Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-            echo ""
-            echo "## 📄 Reports"
-            echo ""
-            echo "A polished PDF report has been generated for this run."
-            echo ""
-            echo "**Download it:** scroll down to the **Artifacts** section and grab \`codeql-pdf-report\`."
-            echo ""
-            echo "Other places to view findings:"
-            echo "- **Security → Code scanning** tab — every alert with file/line context and remediation guidance"
-            echo "- \`codeql-sarif\` artifact — raw SARIF (for tooling)"
-          } >> "$GITHUB_STEP_SUMMARY"
+      # # Echo the report to the workflow run page so reviewers don't even need
+      # # to download anything to get the gist.
+      # - name: Add summary to run page
+      #   if: always()
+      #   run: |
+      #     {
+      #       echo "# 🛡️ CodeQL Security Scan"
+      #       echo ""
+      #       echo "**Branch / commit:** \`${{ github.ref_name }}\` @ \`${{ github.sha }}\`"
+      #       echo ""
+      #       echo "📥 **Download** the \`security-report\` artifact below for a one-page HTML and PDF report grouped by vulnerability category."
+      #       echo ""
+      #       echo "🔍 Full per-line findings are in the **Security → Code scanning** tab."
+      #     } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Comment on PR
-        if: always() && github.event_name == 'pull_request'
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          header: codeql-summary
-          message: |
-            ## 🛡️ CodeQL Security Scan
+      # - name: Comment on PR
+      #   if: always() && github.event_name == 'pull_request'
+      #   uses: marocchino/sticky-pull-request-comment@v2
+      #   with:
+      #     header: codeql-summary
+      #     message: |
+      #       ## 🛡️ CodeQL Security Scan
 
-            A polished PDF report has been generated for this pull request.
+      #       A one-page summary report (HTML + PDF) has been generated.
 
-            **➡ Download** the `codeql-pdf-report` artifact from the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+      #       **➡ Download** the `security-report` artifact from the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
 
-            Findings are also visible in the **Security → Code scanning** tab.
+      #       Detailed findings are in the **Security → Code scanning** tab.
