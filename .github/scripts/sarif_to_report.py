@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Turn a CodeQL SARIF file into a single-page, non-technical HTML report
-grouped by vulnerability category and bucketed by severity.
+Turn one or more SARIF files into a single-page, non-technical HTML report.
+
+Tool-agnostic: works with any SARIF 2.1.0 producer (CodeQL, Semgrep, Trivy,
+Gitleaks, Snyk, Checkov, etc.). Each tool gets a tag on its findings and
+everything is grouped by category and sorted by severity.
 
 Usage:
-    python sarif_to_report.py <sarif-file-or-dir> <output.html>
+    python sarif_to_report.py <sarif-file-or-dir> [more files/dirs...] <output.html>
 """
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -16,21 +20,7 @@ from html import escape
 from pathlib import Path
 
 
-# ---------- severity helpers -------------------------------------------------
-
-def severity_bucket(score: float, level: str) -> str:
-    """Map CodeQL's numeric security-severity (CVSS-style 0-10) to a label.
-    Falls back to the SARIF level only if no numeric score is available."""
-    if score >= 9.0:
-        return "Critical"
-    if score >= 7.0:
-        return "High"
-    if score >= 4.0:
-        return "Medium"
-    if score > 0.0:
-        return "Low"
-    return {"error": "High", "warning": "Medium", "note": "Low"}.get(level, "Info")
-
+# ---------- severity ---------------------------------------------------------
 
 SEVERITY_ORDER = ["Critical", "High", "Medium", "Low", "Info"]
 SEVERITY_COLOR = {
@@ -40,64 +30,56 @@ SEVERITY_COLOR = {
     "Low":      "#0369a1",
     "Info":     "#475569",
 }
-
-# Plain-English descriptions for common CodeQL C# rule families.
-# Key matches the last segment of the rule id (e.g. cs/sql-injection -> sql-injection).
-CATEGORY_DESCRIPTIONS = {
-    "sql-injection":            "User input flows into a database query. Attackers can read, modify, or destroy data.",
-    "command-line-injection":   "User input flows into a shell command. Attackers can run arbitrary commands on the server.",
-    "command-injection":        "User input flows into a shell command. Attackers can run arbitrary commands on the server.",
-    "path-injection":           "User input controls a file path. Attackers can read or write files outside intended folders.",
-    "path-combine":             "File-path building has a flaw where one segment can silently override another.",
-    "xss":                      "User input is rendered in HTML without escaping. Attackers can run scripts in users' browsers.",
-    "log-forging":              "Untrusted input is written to logs as-is. Attackers can fake log entries to confuse audits.",
-    "unsafe-deserialization":   "Untrusted data is turned back into objects. Attackers can run arbitrary code.",
-    "unsafe-deserialization-untrusted-input": "Untrusted data is turned back into objects. Attackers can run arbitrary code.",
-    "url-redirection":          "User input controls a redirect target. Attackers can send users to malicious sites.",
-    "unvalidated-url-redirection": "User input controls a redirect target. Attackers can send users to malicious sites.",
-    "ssrf":                     "Server makes a network request to a URL the user controls. Attackers can reach internal systems.",
-    "request-forgery":          "Server makes a network request to a URL the user controls. Attackers can reach internal systems.",
-    "xxe":                      "XML parser allows external entities. Attackers can read local files or hit internal URLs.",
-    "xml-external-entity":      "XML parser allows external entities. Attackers can read local files or hit internal URLs.",
-    "insecure-dtd-handling":    "XML processing allows Document Type Definitions, which can fetch external data.",
-    "missing-validation":       "Input from outside the system is used without being checked first.",
-    "ecb-encryption":           "Encryption uses ECB mode, which leaks patterns in the data.",
-    "weak-cryptographic-algorithm": "A weak or broken algorithm (e.g. MD5, SHA-1, DES) is used for security.",
-    "weak-encryption":          "A weak or broken encryption algorithm is used.",
-    "broken-cryptographic-algorithm": "A broken cryptographic algorithm is used.",
-    "hard-coded-credentials":   "Passwords or keys are written directly in source code.",
-    "hardcoded-credentials":    "Passwords or keys are written directly in source code.",
-    "insecure-randomness":      "Randomness comes from a predictable source. Tokens or keys can be guessed.",
-    "catch-of-all-exceptions":  "Code swallows every error, hiding real problems from monitoring.",
-    "file-upload":              "Files uploaded from the network are accepted without sufficient checks.",
-    "stack-trace-exposure":     "Internal error details are returned to users, helping attackers map the system.",
-    "cleartext-storage":        "Sensitive data is stored without encryption.",
-    "cleartext-logging":        "Sensitive data is written to logs in plain text.",
+LEVEL_TO_SEVERITY = {
+    "error":   "High",
+    "warning": "Medium",
+    "note":    "Low",
+    "none":    "Info",
+}
+TAG_TO_SEVERITY = {  # some tools (Trivy, Gitleaks) put severity in tags
+    "critical": "Critical",
+    "high":     "High",
+    "medium":   "Medium",
+    "moderate": "Medium",
+    "low":      "Low",
+    "info":     "Info",
+    "informational": "Info",
 }
 
 
-def human_category(rule_id: str, fallback: str = "") -> str:
-    short = rule_id.split("/")[-1] or fallback
-    return short.replace("-", " ").replace("_", " ").capitalize()
+def severity_from_score(score: float) -> str | None:
+    if score >= 9.0: return "Critical"
+    if score >= 7.0: return "High"
+    if score >= 4.0: return "Medium"
+    if score > 0.0:  return "Low"
+    return None
 
 
-def category_key(rule_id: str) -> str:
-    return rule_id.split("/")[-1]
+def pick_severity(score: float, level: str, tags: list[str]) -> str:
+    """CVSS-style score wins. Then SARIF level. Then tags. Then 'Info'."""
+    sev = severity_from_score(score)
+    if sev:
+        return sev
+    if level and level in LEVEL_TO_SEVERITY:
+        return LEVEL_TO_SEVERITY[level]
+    for t in tags or []:
+        s = TAG_TO_SEVERITY.get(t.lower())
+        if s:
+            return s
+    return "Info"
 
 
-# ---------- SARIF parsing ----------------------------------------------------
+# ---------- SARIF helpers ----------------------------------------------------
 
 def collect_rules(run: dict) -> dict[str, dict]:
-    """Build {rule_id -> rule dict} from both driver.rules and every
-    tool.extensions[].rules. CodeQL puts its security rules in extensions."""
+    """Build {rule_id -> rule} from driver and every extension."""
     rules: dict[str, dict] = {}
     tool = run.get("tool", {}) or {}
 
-    def add(rule_list):
-        for rule in rule_list or []:
-            rid = rule.get("id")
-            if rid:
-                rules[rid] = rule
+    def add(lst):
+        for r in lst or []:
+            if r.get("id"):
+                rules[r["id"]] = r
 
     add((tool.get("driver") or {}).get("rules"))
     for ext in tool.get("extensions") or []:
@@ -105,50 +87,103 @@ def collect_rules(run: dict) -> dict[str, dict]:
     return rules
 
 
-def rule_score(rule: dict, result: dict) -> float:
-    """Pull security-severity from the rule first, then the result as a fallback."""
-    for src in (rule.get("properties") or {}, result.get("properties") or {}):
+def get_score(rule: dict, result: dict) -> float:
+    for src in ((result.get("properties") or {}), (rule.get("properties") or {})):
         v = src.get("security-severity")
-        if v is not None:
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                pass
+        if v is None:
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            pass
     return 0.0
 
 
-def rule_default_level(rule: dict) -> str:
-    return ((rule.get("defaultConfiguration") or {}).get("level")) or "warning"
+def get_tags(rule: dict, result: dict) -> list[str]:
+    tags: list[str] = []
+    for src in ((rule.get("properties") or {}), (result.get("properties") or {})):
+        t = src.get("tags")
+        if isinstance(t, list):
+            tags.extend(str(x) for x in t)
+    return tags
+
+
+CWE_RE = re.compile(r"cwe[-/]?(\d+)", re.I)
+
+
+def cwe_ids(tags: list[str]) -> list[str]:
+    out = []
+    for t in tags:
+        m = CWE_RE.search(t)
+        if m:
+            cwe = f"CWE-{m.group(1)}"
+            if cwe not in out:
+                out.append(cwe)
+    return out
+
+
+def is_diagnostic(rule: dict, rule_id: str) -> bool:
+    """Skip extractor-internal noise (CodeQL emits these)."""
+    props = rule.get("properties") or {}
+    tags = props.get("tags") or []
+    if "internal" in tags or "non-attributable" in tags:
+        return True
+    if (props.get("kind") or "") == "diagnostic":
+        return True
+    if "/diagnostics/" in rule_id or rule_id.endswith("-message") or rule_id.endswith("-error"):
+        return True
+    return False
+
+
+def humanise_id(rule_id: str) -> str:
+    """Last segment, dashes/underscores to spaces, sentence-cased."""
+    short = rule_id.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
+    short = short.replace("-", " ").replace("_", " ").strip()
+    return short[:1].upper() + short[1:] if short else rule_id
+
+
+def short_text(s: str, n: int = 240) -> str:
+    s = (s or "").strip().replace("\n", " ")
+    s = re.sub(r"\s+", " ", s)
+    return (s[: n - 1] + "…") if len(s) > n else s
+
+
+# ---------- I/O --------------------------------------------------------------
+
+def collect_sarif_files(args: list[str]) -> list[Path]:
+    out: list[Path] = []
+    for a in args:
+        p = Path(a)
+        if p.is_dir():
+            out.extend(sorted(p.rglob("*.sarif")))
+        elif p.is_file():
+            out.append(p)
+    return out
 
 
 # ---------- main -------------------------------------------------------------
 
-def collect_sarif_files(arg: str) -> list[Path]:
-    p = Path(arg)
-    if p.is_dir():
-        return sorted(p.rglob("*.sarif"))
-    if p.is_file():
-        return [p]
-    return []
-
-
 def main() -> int:
-    if len(sys.argv) != 3:
+    if len(sys.argv) < 3:
         print(__doc__, file=sys.stderr)
         return 2
 
-    src, out_path = sys.argv[1], Path(sys.argv[2])
+    *inputs, out_arg = sys.argv[1:]
+    out_path = Path(out_arg)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    files = collect_sarif_files(src)
+    files = collect_sarif_files(inputs)
     if not files:
-        print(f"No SARIF files found at {src}", file=sys.stderr)
-        out_path.write_text(render([], 0, []), encoding="utf-8")
+        print(f"No SARIF files found at {inputs}", file=sys.stderr)
+        out_path.write_text(render([], 0, set(), {}), encoding="utf-8")
         return 0
 
-    findings_by_rule: dict[str, list[dict]] = defaultdict(list)
-    rule_meta: dict[str, dict] = {}
+    # Aggregate by (tool, rule_id) so multiple findings of the same rule from
+    # the same tool collapse into one card.
+    bucket: dict[tuple[str, str], dict] = {}
     total = 0
+    tools_seen: set[str] = set()
+    sev_counts = {s: 0 for s in SEVERITY_ORDER}
 
     for f in files:
         try:
@@ -158,98 +193,111 @@ def main() -> int:
             continue
 
         for run in data.get("runs", []):
+            tool_name = ((run.get("tool") or {}).get("driver") or {}).get("name", "Unknown tool")
+            tools_seen.add(tool_name)
             rules = collect_rules(run)
 
             for result in run.get("results", []):
                 rid = result.get("ruleId") or ""
                 if not rid:
                     continue
-
                 rule = rules.get(rid, {})
-
-                # Skip CodeQL's own diagnostic / extraction noise
-                tags = ((rule.get("properties") or {}).get("tags")) or []
-                if "internal" in tags or "non-attributable" in tags or rid.startswith("cs/diagnostics") or "diagnostic" in (rule.get("properties") or {}).get("kind", ""):
+                if is_diagnostic(rule, rid):
                     continue
 
-                score = rule_score(rule, result)
-                level = result.get("level") or rule_default_level(rule)
+                tags = get_tags(rule, result)
+                score = get_score(rule, result)
+                level = result.get("level") or ((rule.get("defaultConfiguration") or {}).get("level"))
+                sev = pick_severity(score, level, tags)
 
-                if rid not in rule_meta:
-                    rule_meta[rid] = {
-                        "name": (rule.get("shortDescription") or {}).get("text") or rule.get("name") or rid,
-                        "description": (rule.get("fullDescription") or {}).get("text", ""),
-                        "score": score,
-                        "level": level,
-                    }
-
+                title = (
+                    (rule.get("shortDescription") or {}).get("text")
+                    or rule.get("name")
+                    or humanise_id(rid)
+                )
+                desc = short_text(
+                    (result.get("message") or {}).get("text")
+                    or (rule.get("fullDescription") or {}).get("text")
+                    or (rule.get("shortDescription") or {}).get("text")
+                    or ""
+                )
                 loc = (result.get("locations") or [{}])[0].get("physicalLocation", {}) or {}
-                findings_by_rule[rid].append({
-                    "file": (loc.get("artifactLocation") or {}).get("uri", ""),
-                    "line": (loc.get("region") or {}).get("startLine", 0),
-                    "message": (result.get("message") or {}).get("text", ""),
-                    "level": level,
-                    "score": score,
-                })
+                file_uri = (loc.get("artifactLocation") or {}).get("uri") or ""
+                line = (loc.get("region") or {}).get("startLine") or 0
+
+                key = (tool_name, rid)
+                entry = bucket.get(key)
+                if entry is None:
+                    entry = bucket[key] = {
+                        "tool": tool_name,
+                        "rule_id": rid,
+                        "title": title,
+                        "severity": sev,
+                        "score": score,
+                        "explanation": desc,
+                        "cwes": cwe_ids(tags),
+                        "files": set(),
+                        "count": 0,
+                    }
+                else:
+                    # Keep the worst severity ever seen for the rule
+                    if SEVERITY_ORDER.index(sev) < SEVERITY_ORDER.index(entry["severity"]):
+                        entry["severity"] = sev
+                        entry["score"] = max(entry["score"], score)
+
+                entry["count"] += 1
+                if file_uri:
+                    entry["files"].add(file_uri if not line else f"{file_uri}:{line}")
+                sev_counts[sev] += 1
                 total += 1
 
+    # Finalise
     categories: list[dict] = []
-    for rid, findings in findings_by_rule.items():
-        meta = rule_meta[rid]
-        score = meta["score"]
-        level = meta["level"]
-        sev = severity_bucket(score, level)
+    for c in bucket.values():
+        c["files"] = sorted(c["files"])[:5]
+        categories.append(c)
+    categories.sort(key=lambda c: (
+        SEVERITY_ORDER.index(c["severity"]),
+        -c["count"],
+        c["tool"],
+        c["title"],
+    ))
 
-        ckey = category_key(rid)
-        categories.append({
-            "rule_id": rid,
-            "title": meta["name"],
-            "severity": sev,
-            "score": score,
-            "count": len(findings),
-            "explanation": CATEGORY_DESCRIPTIONS.get(ckey, (meta["description"] or "").strip()[:240]),
-            "files": sorted({f["file"] for f in findings if f["file"]})[:5],
-        })
-
-    # Sort: severity (Critical first), then by count desc, then by title.
-    categories.sort(key=lambda c: (SEVERITY_ORDER.index(c["severity"]), -c["count"], c["title"]))
-
-    out_path.write_text(render(categories, total, files), encoding="utf-8")
-    print(f"Wrote {out_path}  ({total} findings across {len(categories)} categories)")
-    # Diagnostic dump so you can see the bucketing in the workflow log
+    out_path.write_text(render(categories, total, tools_seen, sev_counts), encoding="utf-8")
+    print(f"Wrote {out_path}  ({total} findings across {len(categories)} categories from {len(tools_seen)} tool(s))")
     for c in categories:
-        print(f"  [{c['severity']:8s}] score={c['score']:>4} count={c['count']:>3}  {c['rule_id']}")
+        print(f"  [{c['severity']:8s}] {c['tool']:10s} count={c['count']:>3}  {c['rule_id']}")
     return 0
 
 
 # ---------- HTML rendering ---------------------------------------------------
 
-def render(categories: list[dict], total: int, files: list[Path]) -> str:
-    sev_counts = {s: 0 for s in SEVERITY_ORDER}
-    for c in categories:
-        sev_counts[c["severity"]] += c["count"]
+def render(categories: list[dict], total: int, tools: set[str], sev_counts: dict[str, int]) -> str:
+    if not sev_counts:
+        sev_counts = {s: 0 for s in SEVERITY_ORDER}
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    tool_list = ", ".join(sorted(tools)) if tools else "no scanners"
 
     if total == 0:
         verdict = ("✅", "#16a34a", "No security issues found",
-                   "The scanner did not flag anything in this run.")
-    elif sev_counts["Critical"] > 0:
+                   "The scanners did not flag anything in this run.")
+    elif sev_counts.get("Critical", 0) > 0:
         verdict = ("🚨", "#b91c1c", f"{sev_counts['Critical']} critical issue(s) need attention",
                    "Critical issues are likely exploitable. Fix these first.")
-    elif sev_counts["High"] > 0:
+    elif sev_counts.get("High", 0) > 0:
         verdict = ("⚠️", "#ea580c", f"{sev_counts['High']} high-severity issue(s) found",
                    "Plan fixes for these in the current sprint.")
-    elif sev_counts["Medium"] > 0:
+    elif sev_counts.get("Medium", 0) > 0:
         verdict = ("🟡", "#ca8a04", f"{sev_counts['Medium']} medium-severity issue(s) found",
                    "Real risk but limited blast radius. Schedule a fix.")
     else:
         verdict = ("🔵", "#0369a1", f"{total} low-severity issue(s) found",
                    "Hygiene items. Worth cleaning up over time.")
 
-    summary_chips = "".join(
-        f'<span class="chip" style="--c:{SEVERITY_COLOR[s]}"><b>{sev_counts[s]}</b> {s}</span>'
-        for s in SEVERITY_ORDER if sev_counts[s] > 0
+    chips = "".join(
+        f'<span class="chip" style="--c:{SEVERITY_COLOR[s]}"><b>{sev_counts.get(s, 0)}</b> {s}</span>'
+        for s in SEVERITY_ORDER if sev_counts.get(s, 0) > 0
     ) or '<span class="chip" style="--c:#16a34a"><b>0</b> issues</span>'
 
     cards_html = "\n".join(render_card(c) for c in categories) or render_empty()
@@ -276,7 +324,7 @@ def render(categories: list[dict], total: int, files: list[Path]) -> str:
   }}
   .verdict h2 {{ margin: 0 0 4px; font-size: 20px; }}
   .verdict p {{ margin: 0; color: #475569; }}
-  .summary-row {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 32px; }}
+  .summary-row {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }}
   .chip {{
     background: white; border: 1px solid #e2e8f0; border-radius: 999px;
     padding: 6px 14px; font-size: 14px; color: #334155;
@@ -291,10 +339,19 @@ def render(categories: list[dict], total: int, files: list[Path]) -> str:
   }}
   .card-head {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }}
   .card-title {{ font-size: 16px; font-weight: 600; margin: 0; }}
-  .card-meta {{ display: flex; gap: 8px; align-items: center; }}
+  .card-meta {{ display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }}
   .badge {{
     display: inline-block; padding: 2px 10px; border-radius: 999px;
     font-size: 12px; font-weight: 600; color: white; background: var(--sev);
+  }}
+  .tool {{
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; color: #334155; background: #e2e8f0;
+    text-transform: uppercase; letter-spacing: .03em;
+  }}
+  .cwe {{
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; color: #1e3a8a; background: #dbeafe;
   }}
   .count {{
     background: #f1f5f9; color: #334155; padding: 2px 10px; border-radius: 999px;
@@ -312,14 +369,14 @@ def render(categories: list[dict], total: int, files: list[Path]) -> str:
 </head>
 <body>
   <h1>🛡️ Security Scan Report</h1>
-  <div class="meta">CodeQL · generated {timestamp}</div>
+  <div class="meta">Tools: {escape(tool_list)} · generated {timestamp}</div>
 
   <div class="verdict" style="--accent:{verdict[1]}">
     <h2>{verdict[0]} {escape(verdict[2])}</h2>
     <p>{escape(verdict[3])}</p>
   </div>
 
-  <div class="summary-row">{summary_chips}</div>
+  <div class="summary-row">{chips}</div>
 
   <h2 class="section">Issues by category</h2>
   {cards_html}
@@ -332,7 +389,7 @@ def render(categories: list[dict], total: int, files: list[Path]) -> str:
 
 def render_empty() -> str:
     return ('<div class="card" style="--sev:#16a34a">'
-            '<p class="desc">Nothing to report. The scanner did not flag any issues.</p>'
+            '<p class="desc">Nothing to report. The scanners did not flag any issues.</p>'
             '</div>')
 
 
@@ -344,13 +401,16 @@ def render_card(c: dict) -> str:
         more = f" + {c['count'] - len(c['files'])} more occurrence(s)" if c["count"] > len(c["files"]) else ""
         files_html = f'<div class="files">Where: {items}{escape(more)}</div>'
 
-    score_label = f" · score {c['score']:.1f}" if c["score"] > 0 else ""
+    score_label = f" · {c['score']:.1f}" if c["score"] > 0 else ""
+    cwe_html = " ".join(f'<span class="cwe">{escape(cwe)}</span>' for cwe in c["cwes"][:3])
 
     return f'''
   <div class="card" style="--sev:{color}">
     <div class="card-head">
       <h3 class="card-title">{escape(c["title"])}</h3>
       <div class="card-meta">
+        <span class="tool">{escape(c["tool"])}</span>
+        {cwe_html}
         <span class="badge">{c["severity"]}{escape(score_label)}</span>
         <span class="count">{c["count"]} finding{'s' if c["count"] != 1 else ''}</span>
       </div>
