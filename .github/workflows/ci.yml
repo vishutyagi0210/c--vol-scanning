@@ -121,7 +121,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Trivy fs scan
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@v0.29.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          exit-code: "0"
         with:
           scan-type: fs
           scan-ref: .
