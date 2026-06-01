@@ -85,53 +85,53 @@ jobs:
           sarif csv     -o reports/findings.csv codeql-results || true
           ls -lh reports
 
-      - name: Build PR comment body
-        if: always()
-        run: |
-          {
-            echo "## 🛡️ CodeQL Security Scan"
-            echo ""
-            echo '```text'
-            if [[ -s reports/summary.txt ]]; then
-              cat reports/summary.txt
-            else
-              echo "No summary available."
-            fi
-            echo '```'
-            echo ""
-            echo "_HTML and CSV reports are attached to the workflow run as the \`codeql-human-report\` artifact._"
-          } > reports/pr-comment.md
+      # - name: Build PR comment body
+      #   if: always()
+      #   run: |
+      #     {
+      #       echo "## 🛡️ CodeQL Security Scan"
+      #       echo ""
+      #       echo '```text'
+      #       if [[ -s reports/summary.txt ]]; then
+      #         cat reports/summary.txt
+      #       else
+      #         echo "No summary available."
+      #       fi
+      #       echo '```'
+      #       echo ""
+      #       echo "_HTML and CSV reports are attached to the workflow run as the \`codeql-human-report\` artifact._"
+      #     } > reports/pr-comment.md
 
-      - name: Write summary to workflow run page
-        if: always()
-        run: |
-          {
-            echo "# 🛡️ CodeQL Security Scan Report"
-            echo ""
-            echo "**Repository:** \`${{ github.repository }}\`  "
-            echo "**Branch / commit:** \`${{ github.ref_name }}\` @ \`${{ github.sha }}\`  "
-            echo "**Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-            echo ""
-            echo "## Summary"
-            echo ""
-            if [[ -s reports/summary.txt ]]; then
-              echo '```text'
-              cat reports/summary.txt
-              echo '```'
-            else
-              echo "_No findings, or sarif-tools produced no summary._"
-            fi
-            echo ""
-            echo "## Downloads"
-            echo ""
-            echo "- � \`summary.txt\` — plain text report"
-            echo "- 🌐 \`report.html\`  — open in any browser for the full interactive view"
-            echo "- 📊 \`findings.csv\` — open in Excel / Google Sheets"
-            echo ""
-            echo "Get them from the **Artifacts** section at the bottom of this run page (\`codeql-human-report\`)."
-            echo ""
-            echo "Full results with code context are also available in **Security → Code scanning**."
-          } >> "$GITHUB_STEP_SUMMARY"
+      # - name: Write summary to workflow run page
+      #   if: always()
+      #   run: |
+      #     {
+      #       echo "# 🛡️ CodeQL Security Scan Report"
+      #       echo ""
+      #       echo "**Repository:** \`${{ github.repository }}\`  "
+      #       echo "**Branch / commit:** \`${{ github.ref_name }}\` @ \`${{ github.sha }}\`  "
+      #       echo "**Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+      #       echo ""
+      #       echo "## Summary"
+      #       echo ""
+      #       if [[ -s reports/summary.txt ]]; then
+      #         echo '```text'
+      #         cat reports/summary.txt
+      #         echo '```'
+      #       else
+      #         echo "_No findings, or sarif-tools produced no summary._"
+      #       fi
+      #       echo ""
+      #       echo "## Downloads"
+      #       echo ""
+      #       echo "- � \`summary.txt\` — plain text report"
+      #       echo "- 🌐 \`report.html\`  — open in any browser for the full interactive view"
+      #       echo "- 📊 \`findings.csv\` — open in Excel / Google Sheets"
+      #       echo ""
+      #       echo "Get them from the **Artifacts** section at the bottom of this run page (\`codeql-human-report\`)."
+      #       echo ""
+      #       echo "Full results with code context are also available in **Security → Code scanning**."
+      #     } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload human-readable reports
         if: always()
@@ -141,9 +141,9 @@ jobs:
           path: reports
           retention-days: 30
 
-      - name: Comment summary on PR
-        if: always() && github.event_name == 'pull_request'
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          header: codeql-summary
-          path: reports/pr-comment.md
+      # - name: Comment summary on PR
+      #   if: always() && github.event_name == 'pull_request'
+      #   uses: marocchino/sticky-pull-request-comment@v2
+      #   with:
+      #     header: codeql-summary
+      #     path: reports/pr-comment.md
