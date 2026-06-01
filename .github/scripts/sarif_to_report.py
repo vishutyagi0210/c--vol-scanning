@@ -284,7 +284,7 @@ def main() -> int:
                         "score": score,
                         "explanation": desc,
                         "cwes": cwe_ids(tags),
-                        "files": set(),
+                        "files": [],
                         "count": 0,
                     }
                 else:
@@ -295,16 +295,16 @@ def main() -> int:
 
                 entry["count"] += 1
                 if file_uri:
-                    entry["files"].add(file_uri if not line else f"{file_uri}:{line}")
+                    entry["files"].append(file_uri if not line else f"{file_uri}:{line}")
                 sev_counts[sev] += 1
                 total += 1
 
     # Finalise: compute display fields from the full set, then truncate.
     categories: list[dict] = []
     for c in bucket.values():
-        all_locations = sorted(c["files"])
-        c["unique_locations"] = len(all_locations)
-        c["files"] = all_locations[:10]
+        # Show every finding, ordered by file/line. No deduping, no cap.
+        c["files"] = sorted(c["files"])
+        c["unique_locations"] = len(c["files"])
         categories.append(c)
     categories.sort(key=lambda c: (
         SEVERITY_ORDER.index(c["severity"]),
@@ -449,9 +449,7 @@ def render_card(c: dict) -> str:
     files_html = ""
     if c["files"]:
         items = " ".join(f"<code>{escape(f)}</code>" for f in c["files"])
-        hidden = c["unique_locations"] - len(c["files"])
-        more = f" + {hidden} more location(s)" if hidden > 0 else ""
-        files_html = f'<div class="files">Where: {items}{escape(more)}</div>'
+        files_html = f'<div class="files">Where: {items}</div>'
 
     score_label = f" · {c['score']:.1f}" if c["score"] > 0 else ""
     cwe_html = " ".join(f'<span class="cwe">{escape(cwe)}</span>' for cwe in c["cwes"][:3])
