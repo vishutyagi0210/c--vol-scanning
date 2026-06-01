@@ -1,4 +1,4 @@
-name: Security CI
+name: Security CI (demo)
 
 on:
   push:
@@ -15,22 +15,75 @@ env:
   DOTNET_NOLOGO: "true"
   DOTNET_CLI_TELEMETRY_OPTOUT: "true"
 
+# ----------------------------------------------------------------------------
+# This workflow demonstrates the unified-report pipeline for the real CI:
+#
+#   1. dependency-codeql  → CodeQL "dependency-vulnerability:csharp" SARIF
+#   2. sast-codeql        → CodeQL "sast:csharp"                      SARIF
+#   3. trivy              → Trivy filesystem scan                     SARIF
+#   4. gitleaks           → Gitleaks (Docker, JSON output)            JSON
+#   5. report             → Downloads every artifact, runs the Python
+#                           script, produces ONE PDF + HTML grouped by
+#                           vulnerability category across all scanners.
+#
+# Each scanner job mirrors the composite-action shape from your real
+# pipeline. Swap the `runs-on: ubuntu-latest` for `windows-latest` and
+# the `uses:` lines for your composite actions in production.
+# ----------------------------------------------------------------------------
+
 jobs:
-  codeql:
-    name: SAST (CodeQL)
+  # --- 1. CodeQL: dependency vulnerabilities -------------------------------
+  dependency-codeql:
+    name: CodeQL — dependency vulnerabilities
     runs-on: ubuntu-latest
     permissions:
-      contents: read
       security-events: write
       actions: read
-      pull-requests: write
-
+      contents: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+          build-mode: manual
+
+      - name: Build
+        run: |
+          dotnet restore VulnerableApi.sln
+          dotnet build VulnerableApi.sln --configuration Release --no-restore
+
+      - name: CodeQL analyze (dependency)
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "dependency-vulnerability:csharp"
+          output: dependency-results
+          upload: false
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-codeql-report
+          path: dependency-results
+          retention-days: 7
+
+  # --- 2. CodeQL: SAST -----------------------------------------------------
+  sast-codeql:
+    name: CodeQL — SAST
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
@@ -39,88 +92,152 @@ jobs:
         with:
           languages: csharp
           queries: security-extended,security-and-quality
+          build-mode: manual
 
       - name: Build
         run: |
           dotnet restore VulnerableApi.sln
           dotnet build VulnerableApi.sln --configuration Release --no-restore
 
-      - name: CodeQL analysis
+      - name: CodeQL analyze (SAST)
         uses: github/codeql-action/analyze@v3
         with:
-          category: "/language:csharp"
-          output: codeql-results
-          upload: always
+          category: "sast:csharp"
+          output: sast-results
+          upload: false
 
-      - name: Save raw SARIF as artifact
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: codeql-sarif
-          path: codeql-results
-          retention-days: 30
+          name: sast-codeql-report
+          path: sast-results
+          retention-days: 7
 
-      - name: Setup Python
+  # --- 3. Trivy: filesystem (SCA + secrets + IaC) --------------------------
+  trivy:
+    name: Trivy — filesystem scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy fs scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          exit-code: "0"
+
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/setup-python@v5
+        with:
+          name: trivy-report
+          path: trivy.sarif
+          retention-days: 7
+
+  # --- 4. Gitleaks (matches your composite action: JSON output) ------------
+  gitleaks:
+    name: Gitleaks — secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Gitleaks (Docker, JSON)
+        continue-on-error: true
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/target" \
+            zricethezav/gitleaks:latest detect \
+              --source=/target \
+              --no-git \
+              -v \
+              --report-format=json \
+              --report-path=/target/gitleaks-report.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.json
+          retention-days: 7
+
+  # --- 5. Unified report ---------------------------------------------------
+  report:
+    name: Unified security report
+    if: always()
+    needs: [dependency-codeql, sast-codeql, trivy, gitleaks]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all scan artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: scans
+          pattern: '*-report'
+          merge-multiple: false
+
+      - name: Inspect what we got
+        run: |
+          echo "Downloaded artifacts:"
+          find scans -type f | sort
+
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Generate one-page HTML report
-        if: always()
+      - name: Generate unified HTML report
         run: |
           mkdir -p reports
-          python3 .github/scripts/sarif_to_report.py codeql-results reports/security-report.html
+          python3 .github/scripts/sarif_to_report.py \
+            scans \
+            reports/security-report.html
 
-      # Convert the HTML to a single-page PDF using headless Chrome.
-      - name: Convert HTML to PDF
-        if: always()
+      - name: Convert HTML to PDF (headless Chrome)
         run: |
-          # Chromium ships with the ubuntu-latest runner image
           google-chrome --headless --disable-gpu --no-sandbox \
             --print-to-pdf=reports/security-report.pdf \
             --print-to-pdf-no-header \
-            "file://$(pwd)/reports/security-report.html" || \
-          chromium-browser --headless --disable-gpu --no-sandbox \
-            --print-to-pdf=reports/security-report.pdf \
-            --print-to-pdf-no-header \
-            "file://$(pwd)/reports/security-report.html" || true
-          ls -lh reports
+            "file://$(pwd)/reports/security-report.html"
 
-      - name: Upload PDF report
+      - name: Upload final PDF
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: security-report
           path: reports/security-report.pdf
-          if-no-files-found: warn
           retention-days: 30
 
-      # # Echo the report to the workflow run page so reviewers don't even need
-      # # to download anything to get the gist.
-      # - name: Add summary to run page
-      #   if: always()
-      #   run: |
-      #     {
-      #       echo "# 🛡️ CodeQL Security Scan"
-      #       echo ""
-      #       echo "**Branch / commit:** \`${{ github.ref_name }}\` @ \`${{ github.sha }}\`"
-      #       echo ""
-      #       echo "📥 **Download** the \`security-report\` artifact below for a one-page HTML and PDF report grouped by vulnerability category."
-      #       echo ""
-      #       echo "🔍 Full per-line findings are in the **Security → Code scanning** tab."
-      #     } >> "$GITHUB_STEP_SUMMARY"
+      - name: Add summary to run page
+        if: always()
+        run: |
+          {
+            echo "# 🛡️ Unified Security Scan"
+            echo ""
+            echo "**Branch / commit:** \`${{ github.ref_name }}\` @ \`${{ github.sha }}\`"
+            echo ""
+            echo "Sources combined into one report:"
+            echo "- CodeQL dependency vulnerabilities"
+            echo "- CodeQL SAST (extended security queries)"
+            echo "- Trivy filesystem scan"
+            echo "- Gitleaks secret scan"
+            echo ""
+            echo "📥 Download the **\`security-report\`** artifact below for the unified PDF."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      # - name: Comment on PR
-      #   if: always() && github.event_name == 'pull_request'
-      #   uses: marocchino/sticky-pull-request-comment@v2
-      #   with:
-      #     header: codeql-summary
-      #     message: |
-      #       ## 🛡️ CodeQL Security Scan
+      - name: Comment on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: unified-security-report
+          message: |
+            ## 🛡️ Unified Security Scan
 
-      #       A one-page summary report (HTML + PDF) has been generated.
+            CodeQL (dependency + SAST), Trivy, and Gitleaks have been combined into one PDF.
 
-      #       **➡ Download** the `security-report` artifact from the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
-
-      #       Detailed findings are in the **Security → Code scanning** tab.
+            **➡ Download** the `security-report` artifact from the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).

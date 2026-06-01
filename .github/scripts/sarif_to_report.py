@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Turn one or more SARIF files into a single-page, non-technical HTML report.
+Turn one or more SARIF (or Gitleaks JSON) files into a single-page,
+non-technical HTML report.
 
 Tool-agnostic: works with any SARIF 2.1.0 producer (CodeQL, Semgrep, Trivy,
-Gitleaks, Snyk, Checkov, etc.). Each tool gets a tag on its findings and
-everything is grouped by category and sorted by severity.
+Snyk, Checkov, etc.) and also reads Gitleaks v8 JSON output as a special case.
+Each tool gets a tag on its findings and everything is grouped by category
+and sorted by severity.
 
 Usage:
-    python sarif_to_report.py <sarif-file-or-dir> [more files/dirs...] <output.html>
+    python sarif_to_report.py <file-or-dir> [more files/dirs...] <output.html>
 """
 from __future__ import annotations
 
@@ -150,15 +152,67 @@ def short_text(s: str, n: int = 240) -> str:
 
 # ---------- I/O --------------------------------------------------------------
 
-def collect_sarif_files(args: list[str]) -> list[Path]:
+def collect_input_files(args: list[str]) -> list[Path]:
+    """Find SARIF and known JSON report files (Gitleaks) under each input path."""
     out: list[Path] = []
     for a in args:
         p = Path(a)
         if p.is_dir():
             out.extend(sorted(p.rglob("*.sarif")))
+            out.extend(sorted(p.rglob("gitleaks-report*.json")))
         elif p.is_file():
             out.append(p)
     return out
+
+
+def gitleaks_json_to_runs(data) -> list[dict]:
+    """Convert Gitleaks v8 JSON (flat list of findings) into SARIF-shaped runs."""
+    if not isinstance(data, list):
+        return []
+    rules: dict[str, dict] = {}
+    results: list[dict] = []
+    for f in data:
+        rid = f.get("RuleID") or "gitleaks"
+        if rid not in rules:
+            rules[rid] = {
+                "id": rid,
+                "shortDescription": {"text": f.get("Description") or rid},
+                "defaultConfiguration": {"level": "error"},
+                "properties": {"tags": ["secret"]},
+            }
+        results.append({
+            "ruleId": rid,
+            "level": "error",
+            "message": {"text": f.get("Description") or "Hardcoded secret detected"},
+            "locations": [{
+                "physicalLocation": {
+                    "artifactLocation": {"uri": f.get("File") or ""},
+                    "region": {"startLine": f.get("StartLine") or 0},
+                }
+            }],
+        })
+    return [{
+        "tool": {"driver": {"name": "Gitleaks", "rules": list(rules.values())}},
+        "results": results,
+    }]
+
+
+def load_runs(path: Path) -> list[dict]:
+    """Read a file and return SARIF-shaped runs, regardless of source format."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"Skipping {path}: {e}", file=sys.stderr)
+        return []
+    if isinstance(data, list):
+        # Gitleaks JSON format
+        return gitleaks_json_to_runs(data)
+    if isinstance(data, dict):
+        if "runs" in data:
+            return data["runs"]
+        # Some single-finding shapes — wrap so they fall through
+        return []
+    return []
 
 
 # ---------- main -------------------------------------------------------------
@@ -172,9 +226,9 @@ def main() -> int:
     out_path = Path(out_arg)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    files = collect_sarif_files(inputs)
+    files = collect_input_files(inputs)
     if not files:
-        print(f"No SARIF files found at {inputs}", file=sys.stderr)
+        print(f"No report files found at {inputs}", file=sys.stderr)
         out_path.write_text(render([], 0, set(), {}), encoding="utf-8")
         return 0
 
@@ -186,13 +240,7 @@ def main() -> int:
     sev_counts = {s: 0 for s in SEVERITY_ORDER}
 
     for f in files:
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-        except Exception as e:
-            print(f"Skipping {f}: {e}", file=sys.stderr)
-            continue
-
-        for run in data.get("runs", []):
+        for run in load_runs(f):
             tool_name = ((run.get("tool") or {}).get("driver") or {}).get("name", "Unknown tool")
             tools_seen.add(tool_name)
             rules = collect_rules(run)
