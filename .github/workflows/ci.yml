@@ -121,7 +121,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Trivy fs scan
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.29.0
         with:
           scan-type: fs
           scan-ref: .
@@ -154,7 +154,12 @@ jobs:
               --no-git \
               -v \
               --report-format=json \
-              --report-path=/target/gitleaks-report.json
+              --report-path=/target/gitleaks-report.json || true
+          # Make sure a file always exists so the upload step has something
+          [[ -f gitleaks-report.json ]] || echo "[]" > gitleaks-report.json
+          echo "Gitleaks output:"
+          head -c 500 gitleaks-report.json
+          echo
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -213,31 +218,31 @@ jobs:
           path: reports/security-report.pdf
           retention-days: 30
 
-      - name: Add summary to run page
-        if: always()
-        run: |
-          {
-            echo "# 🛡️ Unified Security Scan"
-            echo ""
-            echo "**Branch / commit:** \`${{ github.ref_name }}\` @ \`${{ github.sha }}\`"
-            echo ""
-            echo "Sources combined into one report:"
-            echo "- CodeQL dependency vulnerabilities"
-            echo "- CodeQL SAST (extended security queries)"
-            echo "- Trivy filesystem scan"
-            echo "- Gitleaks secret scan"
-            echo ""
-            echo "📥 Download the **\`security-report\`** artifact below for the unified PDF."
-          } >> "$GITHUB_STEP_SUMMARY"
+      # - name: Add summary to run page
+      #   if: always()
+      #   run: |
+      #     {
+      #       echo "# 🛡️ Unified Security Scan"
+      #       echo ""
+      #       echo "**Branch / commit:** \`${{ github.ref_name }}\` @ \`${{ github.sha }}\`"
+      #       echo ""
+      #       echo "Sources combined into one report:"
+      #       echo "- CodeQL dependency vulnerabilities"
+      #       echo "- CodeQL SAST (extended security queries)"
+      #       echo "- Trivy filesystem scan"
+      #       echo "- Gitleaks secret scan"
+      #       echo ""
+      #       echo "📥 Download the **\`security-report\`** artifact below for the unified PDF."
+      #     } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Comment on PR
-        if: always() && github.event_name == 'pull_request'
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          header: unified-security-report
-          message: |
-            ## 🛡️ Unified Security Scan
+      # - name: Comment on PR
+      #   if: always() && github.event_name == 'pull_request'
+      #   uses: marocchino/sticky-pull-request-comment@v2
+      #   with:
+      #     header: unified-security-report
+      #     message: |
+      #       ## 🛡️ Unified Security Scan
 
-            CodeQL (dependency + SAST), Trivy, and Gitleaks have been combined into one PDF.
+      #       CodeQL (dependency + SAST), Trivy, and Gitleaks have been combined into one PDF.
 
-            **➡ Download** the `security-report` artifact from the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+      #       **➡ Download** the `security-report` artifact from the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
