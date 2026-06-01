@@ -23,6 +23,7 @@ jobs:
       contents: read
       security-events: write
       actions: read
+      pull-requests: write   # needed to leave the human-readable PR comment
 
     steps:
       - name: Checkout
@@ -59,3 +60,123 @@ jobs:
           path: codeql-results
           if-no-files-found: warn
           retention-days: 30
+
+      # -----------------------------------------------------------------------
+      # Human-readable summary
+      # Reads the SARIF file CodeQL just produced, builds a friendly Markdown
+      # report, and writes it to:
+      #   1. $GITHUB_STEP_SUMMARY  -> shown on the workflow run page
+      #   2. summary.md artifact   -> downloadable for sharing
+      # -----------------------------------------------------------------------
+      - name: Install jq
+        if: always()
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+
+      - name: Generate human-readable report
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          SARIF=$(find codeql-results -name "*.sarif" | head -1)
+
+          if [[ -z "${SARIF:-}" || ! -f "$SARIF" ]]; then
+            echo "No SARIF file found." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Severity buckets based on CodeQL's security-severity (CVSS-style 0-10)
+          CRITICAL=$(jq '[.runs[].results[] | select(((.properties["security-severity"] // "0") | tonumber) >= 9.0)] | length' "$SARIF")
+          HIGH=$(jq     '[.runs[].results[] | select((((.properties["security-severity"] // "0") | tonumber) >= 7.0) and (((.properties["security-severity"] // "0") | tonumber) < 9.0))] | length' "$SARIF")
+          MEDIUM=$(jq   '[.runs[].results[] | select((((.properties["security-severity"] // "0") | tonumber) >= 4.0) and (((.properties["security-severity"] // "0") | tonumber) < 7.0))] | length' "$SARIF")
+          LOW=$(jq      '[.runs[].results[] | select(((.properties["security-severity"] // "0") | tonumber) > 0.0 and (((.properties["security-severity"] // "0") | tonumber) < 4.0))] | length' "$SARIF")
+          OTHER=$(jq    '[.runs[].results[] | select((.properties["security-severity"] // null) == null)] | length' "$SARIF")
+          TOTAL=$(jq    '[.runs[].results[]] | length' "$SARIF")
+
+          # Verdict banner
+          if   [[ "$CRITICAL" -gt 0 ]]; then VERDICT="🚨 **Critical issues found — please review immediately.**"
+          elif [[ "$HIGH"     -gt 0 ]]; then VERDICT="⚠️ **High-severity issues found.**"
+          elif [[ "$MEDIUM"   -gt 0 ]]; then VERDICT="🟡 **Medium-severity issues found.**"
+          elif [[ "$TOTAL"    -gt 0 ]]; then VERDICT="🔵 **Low-severity issues only.**"
+          else                                VERDICT="✅ **No security issues found.**"
+          fi
+
+          {
+            echo "# 🛡️ Security Scan Report — CodeQL"
+            echo ""
+            echo "**Repository:** \`${{ github.repository }}\`  "
+            echo "**Branch / commit:** \`${{ github.ref_name }}\` @ \`${{ github.sha }}\`  "
+            echo "**Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo ""
+            echo "## Verdict"
+            echo ""
+            echo "$VERDICT"
+            echo ""
+            echo "## Summary of findings"
+            echo ""
+            echo "| Severity | Count |"
+            echo "|---|---:|"
+            echo "| 🔴 Critical | $CRITICAL |"
+            echo "| 🟠 High     | $HIGH |"
+            echo "| 🟡 Medium   | $MEDIUM |"
+            echo "| 🔵 Low      | $LOW |"
+            echo "| ⚪ Other    | $OTHER |"
+            echo "| **Total**   | **$TOTAL** |"
+            echo ""
+
+            if [[ "$TOTAL" -gt 0 ]]; then
+              echo "## Top findings"
+              echo ""
+              echo "| Severity | Issue | File | Line |"
+              echo "|---|---|---|---:|"
+              jq -r '
+                .runs[].results[]
+                | . as $r
+                | (((.properties["security-severity"] // "0") | tonumber)) as $score
+                | (
+                    if   $score >= 9 then "🔴 Critical"
+                    elif $score >= 7 then "🟠 High"
+                    elif $score >= 4 then "🟡 Medium"
+                    elif $score > 0  then "🔵 Low"
+                    else                  "⚪ Note"
+                    end
+                  ) as $sev
+                | [
+                    $sev,
+                    ($r.message.text // $r.ruleId | gsub("[|\n]"; " ") | .[0:140]),
+                    ($r.locations[0].physicalLocation.artifactLocation.uri // "n/a"),
+                    ($r.locations[0].physicalLocation.region.startLine // 0 | tostring)
+                  ]
+                | "| \(.[0]) | \(.[1]) | `\(.[2])` | \(.[3]) |"
+              ' "$SARIF" \
+                | sort \
+                | head -25
+              echo ""
+              echo "_Showing top 25 findings. The full list is in the_ **Security → Code scanning** _tab and in the \`codeql-sarif\` artifact._"
+            fi
+
+            echo ""
+            echo "## What do these mean?"
+            echo ""
+            echo "- 🔴 **Critical** — Should be fixed right away. Likely exploitable."
+            echo "- 🟠 **High** — Important. Plan a fix soon."
+            echo "- 🟡 **Medium** — Real but limited risk. Address in the normal cycle."
+            echo "- 🔵 **Low** — Hygiene / hardening. Good to clean up over time."
+            echo ""
+            echo "_Definitions follow CVSS-style severity scoring used by CodeQL._"
+          } | tee summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload summary as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-summary
+          path: summary.md
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Comment summary on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: codeql-summary
+          path: summary.md
