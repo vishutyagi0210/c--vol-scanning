@@ -87,12 +87,13 @@ jobs:
             "file://$(pwd)/reports/security-report.html" || true
           ls -lh reports
 
-      - name: Upload human-readable report
+      - name: Upload PDF report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: security-report
-          path: reports
+          path: reports/security-report.pdf
+          if-no-files-found: warn
           retention-days: 30
 
       # # Echo the report to the workflow run page so reviewers don't even need
