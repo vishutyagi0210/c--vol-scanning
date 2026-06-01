@@ -208,33 +208,33 @@ jobs:
           pattern: '*-report'
           merge-multiple: false
 
-      - name: Inspect what we got
-        run: |
-          echo "================================================"
-          echo "Files downloaded into scans/"
-          echo "================================================"
-          find scans -type f -exec ls -lh {} \;
-          echo
-          echo "================================================"
-          echo "Quick content peek per file"
-          echo "================================================"
-          for f in $(find scans -type f); do
-            echo
-            echo "--- $f ---"
-            if [[ "$f" == *.sarif ]]; then
-              # Count results across all runs
-              results=$(jq '[.runs[].results[]?] | length' "$f" 2>/dev/null || echo "?")
-              tool=$(jq -r '.runs[0].tool.driver.name // "unknown"' "$f" 2>/dev/null)
-              echo "tool=$tool   results=$results"
-            elif [[ "$f" == *gitleaks*.json ]]; then
-              count=$(jq 'length' "$f" 2>/dev/null || echo "?")
-              echo "gitleaks_findings=$count"
-            else
-              echo "(non-sarif file, size $(wc -c < "$f") bytes)"
-            fi
-          done
-          echo "================================================"
-        # jq is preinstalled on ubuntu runners
+      # - name: Inspect what we got
+      #   run: |
+      #     echo "================================================"
+      #     echo "Files downloaded into scans/"
+      #     echo "================================================"
+      #     find scans -type f -exec ls -lh {} \;
+      #     echo
+      #     echo "================================================"
+      #     echo "Quick content peek per file"
+      #     echo "================================================"
+      #     for f in $(find scans -type f); do
+      #       echo
+      #       echo "--- $f ---"
+      #       if [[ "$f" == *.sarif ]]; then
+      #         # Count results across all runs
+      #         results=$(jq '[.runs[].results[]?] | length' "$f" 2>/dev/null || echo "?")
+      #         tool=$(jq -r '.runs[0].tool.driver.name // "unknown"' "$f" 2>/dev/null)
+      #         echo "tool=$tool   results=$results"
+      #       elif [[ "$f" == *gitleaks*.json ]]; then
+      #         count=$(jq 'length' "$f" 2>/dev/null || echo "?")
+      #         echo "gitleaks_findings=$count"
+      #       else
+      #         echo "(non-sarif file, size $(wc -c < "$f") bytes)"
+      #       fi
+      #     done
+      #     echo "================================================"
+      #   # jq is preinstalled on ubuntu runners
 
       - uses: actions/setup-python@v5
         with:
@@ -243,14 +243,13 @@ jobs:
       - name: Generate unified HTML report
         run: |
           mkdir -p reports
-          # Run the script and tee its diagnostic output so it shows up in the run log
           python3 .github/scripts/sarif_to_report.py \
             scans \
             reports/security-report.html \
             | tee reports/script-output.txt
-          echo
-          echo "Tools that contributed to the report:"
-          grep -oE '\[[A-Za-z]+ *\] [A-Za-z]+' reports/script-output.txt | awk '{print $2}' | sort -u || true
+          # echo
+          # echo "Tools that contributed to the report:"
+          # grep -oE '\[[A-Za-z]+ *\] [A-Za-z]+' reports/script-output.txt | awk '{print $2}' | sort -u || true
 
       - name: Convert HTML to PDF (headless Chrome)
         run: |
