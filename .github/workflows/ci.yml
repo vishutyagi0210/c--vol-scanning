@@ -120,6 +120,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # Trivy reads NuGet vulns from the lockfile that `dotnet restore` produces.
+      # Without restoring first, transitive CVEs are invisible.
+      - name: Restore (so Trivy sees the lockfile)
+        run: dotnet restore VulnerableApi.sln --use-lock-file --force-evaluate
+
       - name: Trivy fs scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -128,7 +137,13 @@ jobs:
           format: sarif
           output: trivy.sarif
           severity: CRITICAL,HIGH,MEDIUM,LOW
+          # Tell Trivy which scanners to enable: vuln (CVEs) + secret + misconfig
+          scanners: vuln,secret,misconfig
           exit-code: "0"
+
+      - name: Show Trivy result count
+        run: |
+          jq '[.runs[].results[]?] | length' trivy.sarif
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -143,23 +158,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full git history so Gitleaks can scan past commits
 
       - name: Run Gitleaks (Docker, JSON)
         continue-on-error: true
         run: |
+          # --no-git=false → scan the actual git history, not just the working tree.
+          # --redact=0 → keep matches in the report.
+          # --log-level=info → so the runner log shows what it's doing.
           docker run --rm \
             -v "${{ github.workspace }}:/target" \
             zricethezav/gitleaks:latest detect \
               --source=/target \
-              --no-git \
-              -v \
+              --log-level=info \
+              --redact=0 \
               --report-format=json \
               --report-path=/target/gitleaks-report.json || true
-          # Make sure a file always exists so the upload step has something
+          # Always leave a valid JSON file behind so the report job can parse it
           [[ -f gitleaks-report.json ]] || echo "[]" > gitleaks-report.json
-          echo "Gitleaks output:"
-          head -c 500 gitleaks-report.json
+          echo "Gitleaks output preview:"
+          head -c 1000 gitleaks-report.json
           echo
+          echo "Findings count: $(jq 'length' gitleaks-report.json)"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -189,8 +210,31 @@ jobs:
 
       - name: Inspect what we got
         run: |
-          echo "Downloaded artifacts:"
-          find scans -type f | sort
+          echo "================================================"
+          echo "Files downloaded into scans/"
+          echo "================================================"
+          find scans -type f -exec ls -lh {} \;
+          echo
+          echo "================================================"
+          echo "Quick content peek per file"
+          echo "================================================"
+          for f in $(find scans -type f); do
+            echo
+            echo "--- $f ---"
+            if [[ "$f" == *.sarif ]]; then
+              # Count results across all runs
+              results=$(jq '[.runs[].results[]?] | length' "$f" 2>/dev/null || echo "?")
+              tool=$(jq -r '.runs[0].tool.driver.name // "unknown"' "$f" 2>/dev/null)
+              echo "tool=$tool   results=$results"
+            elif [[ "$f" == *gitleaks*.json ]]; then
+              count=$(jq 'length' "$f" 2>/dev/null || echo "?")
+              echo "gitleaks_findings=$count"
+            else
+              echo "(non-sarif file, size $(wc -c < "$f") bytes)"
+            fi
+          done
+          echo "================================================"
+        # jq is preinstalled on ubuntu runners
 
       - uses: actions/setup-python@v5
         with:
@@ -199,9 +243,14 @@ jobs:
       - name: Generate unified HTML report
         run: |
           mkdir -p reports
+          # Run the script and tee its diagnostic output so it shows up in the run log
           python3 .github/scripts/sarif_to_report.py \
             scans \
-            reports/security-report.html
+            reports/security-report.html \
+            | tee reports/script-output.txt
+          echo
+          echo "Tools that contributed to the report:"
+          grep -oE '\[[A-Za-z]+ *\] [A-Za-z]+' reports/script-output.txt | awk '{print $2}' | sort -u || true
 
       - name: Convert HTML to PDF (headless Chrome)
         run: |
