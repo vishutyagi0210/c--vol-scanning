@@ -23,7 +23,7 @@ jobs:
       contents: read
       security-events: write
       actions: read
-      pull-requests: write   # for the PR comment
+      pull-requests: write
 
     steps:
       - name: Checkout
@@ -61,89 +61,58 @@ jobs:
           retention-days: 30
 
       # -----------------------------------------------------------------------
-      # Human-readable report via Microsoft's sarif-tools.
-      #
-      # https://github.com/microsoft/sarif-tools
-      # Generates: summary.txt, report.html, findings.csv
+      # Polished PDF report — uses HTML templates + headless Chrome
+      # https://github.com/rsdmike/github-security-report-action
       # -----------------------------------------------------------------------
-      - name: Setup Python
+      - name: Generate PDF security report
         if: always()
-        uses: actions/setup-python@v5
+        uses: rsdmike/github-security-report-action@v3.0.4
         with:
-          python-version: "3.12"
+          token: ${{ secrets.GIT_TOKEN }}
+          sarifReportDir: codeql-results
+          outputDir: reports
+          template: report
 
-      - name: Install sarif-tools
-        if: always()
-        run: pip install --quiet sarif-tools
-
-      - name: Generate human-readable reports
-        if: always()
-        run: |
-          mkdir -p reports
-          sarif summary -o reports/summary.txt codeql-results || true
-          sarif html    -o reports/report.html  codeql-results || true
-          sarif csv     -o reports/findings.csv codeql-results || true
-          ls -lh reports
-
-      # - name: Build PR comment body
-      #   if: always()
-      #   run: |
-      #     {
-      #       echo "## 🛡️ CodeQL Security Scan"
-      #       echo ""
-      #       echo '```text'
-      #       if [[ -s reports/summary.txt ]]; then
-      #         cat reports/summary.txt
-      #       else
-      #         echo "No summary available."
-      #       fi
-      #       echo '```'
-      #       echo ""
-      #       echo "_HTML and CSV reports are attached to the workflow run as the \`codeql-human-report\` artifact._"
-      #     } > reports/pr-comment.md
-
-      # - name: Write summary to workflow run page
-      #   if: always()
-      #   run: |
-      #     {
-      #       echo "# 🛡️ CodeQL Security Scan Report"
-      #       echo ""
-      #       echo "**Repository:** \`${{ github.repository }}\`  "
-      #       echo "**Branch / commit:** \`${{ github.ref_name }}\` @ \`${{ github.sha }}\`  "
-      #       echo "**Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-      #       echo ""
-      #       echo "## Summary"
-      #       echo ""
-      #       if [[ -s reports/summary.txt ]]; then
-      #         echo '```text'
-      #         cat reports/summary.txt
-      #         echo '```'
-      #       else
-      #         echo "_No findings, or sarif-tools produced no summary._"
-      #       fi
-      #       echo ""
-      #       echo "## Downloads"
-      #       echo ""
-      #       echo "- � \`summary.txt\` — plain text report"
-      #       echo "- 🌐 \`report.html\`  — open in any browser for the full interactive view"
-      #       echo "- 📊 \`findings.csv\` — open in Excel / Google Sheets"
-      #       echo ""
-      #       echo "Get them from the **Artifacts** section at the bottom of this run page (\`codeql-human-report\`)."
-      #       echo ""
-      #       echo "Full results with code context are also available in **Security → Code scanning**."
-      #     } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload human-readable reports
+      - name: Upload PDF report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: codeql-human-report
-          path: reports
+          name: codeql-pdf-report
+          path: reports/*.pdf
+          if-no-files-found: warn
           retention-days: 30
 
-      # - name: Comment summary on PR
-      #   if: always() && github.event_name == 'pull_request'
-      #   uses: marocchino/sticky-pull-request-comment@v2
-      #   with:
-      #     header: codeql-summary
-      #     path: reports/pr-comment.md
+      - name: Write summary to workflow run page
+        if: always()
+        run: |
+          {
+            echo "# 🛡️ CodeQL Security Scan"
+            echo ""
+            echo "**Repository:** \`${{ github.repository }}\`  "
+            echo "**Branch / commit:** \`${{ github.ref_name }}\` @ \`${{ github.sha }}\`  "
+            echo "**Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo ""
+            echo "## 📄 Reports"
+            echo ""
+            echo "A polished PDF report has been generated for this run."
+            echo ""
+            echo "**Download it:** scroll down to the **Artifacts** section and grab \`codeql-pdf-report\`."
+            echo ""
+            echo "Other places to view findings:"
+            echo "- **Security → Code scanning** tab — every alert with file/line context and remediation guidance"
+            echo "- \`codeql-sarif\` artifact — raw SARIF (for tooling)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: codeql-summary
+          message: |
+            ## 🛡️ CodeQL Security Scan
+
+            A polished PDF report has been generated for this pull request.
+
+            **➡ Download** the `codeql-pdf-report` artifact from the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+
+            Findings are also visible in the **Security → Code scanning** tab.
