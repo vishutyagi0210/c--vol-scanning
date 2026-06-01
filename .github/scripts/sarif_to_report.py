@@ -302,7 +302,7 @@ def main() -> int:
     # Finalise
     categories: list[dict] = []
     for c in bucket.values():
-        c["files"] = sorted(c["files"])[:5]
+        c["files"] = sorted(c["files"])[:10]
         categories.append(c)
     categories.sort(key=lambda c: (
         SEVERITY_ORDER.index(c["severity"]),
